@@ -1,0 +1,219 @@
+<command>
+<name>process usr schagt rpts</name>
+<description>send usr daily rpts</description>
+<type>Local Syntax</type>
+<local-syntax>
+<![CDATA[
+
+	/*JDK - grab all report that are configured for this schagt 
+	 *      (meaning all reports that are defined  to go out on 
+	 *      this report schedule - each schagt is a different report schedule)*/
+	if (@taskid != null)
+	{
+		[select *
+		   from usr_rpt_cnfg
+		  where wh_id = nvl(@wh_id, @@wh_id)
+			and taskid = @taskid
+			and ena_flg = 1] catch(@?)
+			
+	}
+	else
+	{
+		[select usr_rpt_cnfg.*,
+				@ship_id ship_id
+		   from usr_rpt_cnfg
+		  where wh_id = nvl(@wh_id, @@wh_id)
+			and serv_id = @serv_id
+			and client_id = @client_id
+			and ena_flg = 1] catch(@?)
+	}
+	|
+	if (@? = 0)
+	{
+		[select count(*) cnt
+		   from invsum
+		  where prt_client_id = @client_id
+			and wh_id = nvl(@wh_id, @@wh_id)]
+		|
+		if (@cnt > 0)
+		{
+			get warehouse id
+			|
+			get environment
+			 where envvar = 'LESDIR'
+			|
+			[select to_char(sysdate, 'YYYYMMDDHH24MISS') rpt_date,
+					'SUPER' gen_usr_id
+			   from dual]
+			|
+			/*JDK - build the file path*/
+			[select @LESDIR || '\reports\temp\' || nvl(@wh_id, @@wh_id) || '_' || @usr_rpt_id || '_' || @client_id || '-' || @rpt_date || '.' || @file_ext path,
+					nvl(@wh_id, @@wh_id) || '_' || @usr_rpt_id || '_' || @client_id || '-' || @rpt_date || '.' || @file_ext csv_filnam
+			   from dual]
+			|
+			/*JDK - get email host information*/
+			[select rtstr1 mail_from,
+					rtstr2 hostname,
+					rtnum1 port
+			   from poldat_view
+			  where polcod = 'JDK-INSTALLED-FEATURES'
+				and polvar = 'RPT-HOST'
+				and polval = 'HOST-INFO'
+				and wh_id = nvl(@wh_id, @@wh_id)]
+			|
+			if (@file_typ = 'csv')
+			{
+				[select @LESDIR || '\reports\temp\' csvpath,
+						@LESDIR || '\reports\temp\' || @csv_filnam path
+				   from dual]
+				|
+				/*JDK - pulls back this report's specific 'generate moca report' logic*/
+				[select gen_logic
+				   from usr_rpt_gen_cnfg
+				  where rpt_id = @usr_rpt_id
+					and client_id = @client_id
+					and wh_id = nvl(@wh_id, @@wh_id)
+					and gen_logic is not null] catch(@?)
+				|
+				if(@? != 0)
+				{
+					[select gen_logic
+					   from usr_rpt_gen_cnfg
+					  where rpt_id = @usr_rpt_id
+						and client_id = '----'
+						and wh_id = nvl(@wh_id, @@wh_id)
+						and gen_logic is not null] catch(@?)
+				}
+				|
+				/*This will call any data-gathering logic for the csv*/
+				execute server command
+				 where cmd = @gen_logic catch(@?) >> res
+				|
+				if (rowcount(@res) > 0)
+				{
+					write csv file
+					 where resdata = @res
+					   and filnam = @csv_filnam
+					   and path = @csvpath catch(@?)
+					|
+					publish data
+					 where csv_ret = @?
+				}
+				else
+				{
+					publish data
+					 where csv_ret = @?
+				}
+			}
+			else
+			{
+				/*JDK - if tim_span is populated, then it will pull back data 
+				 *      from the defined number of days ago (builds the from_date and 
+				 *      to_date for reports). Keep in mind that the from_date and to_date 
+				 *      funcionality is defined by the report's parameters and the report's usr_rpt_gen_cnfg record*/
+				if (@tim_span and @tim_span != '')
+				{
+					/*JDK - calculate first of month*/
+					if (@tim_span = 'FOM')
+					{
+						[select to_char(dateadd(month, datediff(month, 0, sysdate), 0), 'YYYYMMDDHH24MISS') from_dte,
+								to_char(dateadd(day, 0, datediff(day, 0, sysdate -1)), 'YYYYMMDDHH24MISS') to_dte
+						   from dual]
+					}
+					/*JDK - static number of days back*/
+					else
+					{
+						[select rtnum1 days_bck
+						   from poldat_view
+						  where polcod = 'JDK-INSTALLED-FEATURES'
+							and polvar = 'RPT-TIME-SPAN'
+							and polval = @tim_span
+							and wh_id = nvl(@wh_id, @@wh_id)]
+						|
+						[select dateadd(D, @days_bck, sysdate) from_dte,
+								sysdate to_dte
+						   from dual]
+					}
+					|
+					publish data
+					 where to_dte = to_date(@to_dte, 'YYYYMMDD')
+					   and from_dte = to_date(@from_dte, 'YYYYMMDD')
+				}
+				|
+				/*JDK - pulls back this report's specific 'generate moca report' logic*/
+				[select gen_logic
+				   from usr_rpt_gen_cnfg
+				  where rpt_id = @usr_rpt_id
+					and client_id = @client_id
+					and wh_id = nvl(@wh_id, @@wh_id)
+					and gen_logic is not null] catch(@?)
+				|
+				if(@? != 0)
+				{
+					[select gen_logic
+					   from usr_rpt_gen_cnfg
+					  where rpt_id = @usr_rpt_id
+						and client_id = '----'
+						and wh_id = nvl(@wh_id, @@wh_id)
+						and gen_logic is not null] catch(@?)
+				}
+				|
+				execute server command
+				 where cmd = @gen_logic catch(@?)
+			}
+			|
+			if (decode(@csv_ret, null, @? = 0, @csv_ret = 0))
+			{
+				[select lngdsc rpt_dsc
+				   from dscmst
+				  where colnam = 'rpt_id'
+					and colval = @usr_rpt_id] catch(@?)
+				|
+				/*JDK - this will grab all client email addresses that are set to receive the current report*/
+				[select distinct rtstr2 email_adr
+				   from poldat_view
+				  where polcod = 'JDK-INSTALLED-FEATURES'
+					and polvar = 'RPT-EMAILS'
+					and polval = @usr_rpt_cnfg_id || ':' || @client_id
+					and wh_id = nvl(@wh_id, @@wh_id)
+					and rtstr1 = @usr_rpt_id] catch(@?)
+				|
+				if (@? = 0)
+				{
+					send email
+					 where hostname = @hostname
+					   and port = @port
+					   and mail_from = @mail_from
+					   and send_to = @email_adr
+					   and reply_to = @mail_from
+					   and subject = nvl(@wh_id, @@wh_id) || ' ' || @rpt_dsc || ' - ' || @client_id || ' ' || @rpt_date
+					   and message = 'Attached is your ' || @rpt_dsc || ' report for inventory stored at Warehouse - ' || @wh_id
+					   and attachments = @path  || decode(@tc_doc, null, '', ';' || @LESDIR || '\reports\' || @tc_doc) catch(@?)
+					|
+					write daily transaction
+					 where oprcod = 'EMAIL-RPT'
+					   and actcod = decode(@?, 0, 'EMAIL-SENT', 'EMAIL-ERR')
+					   and wh_id = nvl(@wh_id, @@wh_id)
+					   and adj_ref1 = @client_id
+					   and adj_ref2 = @usr_rpt_cnfg_id
+					   and usr_id = @usr_rpt_id
+					   and cmnt = decode(@?, 0, @email_adr, 'Error sending email')
+				}
+			}
+			else
+			{
+				write daily transaction
+				 where oprcod = 'EMAIL-RPT'
+				   and actcod = 'RPT-ERR'
+				   and wh_id = nvl(@wh_id, @@wh_id)
+				   and adj_ref1 = @client_id
+				   and adj_ref2 = @usr_rpt_cnfg_id
+				   and usr_id = @usr_rpt_id
+				   and cmnt = 'Error generating report'
+			}
+		}
+	}
+
+]]>
+</local-syntax>
+</command>
